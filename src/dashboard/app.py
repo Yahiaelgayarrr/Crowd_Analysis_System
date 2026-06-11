@@ -186,7 +186,7 @@ st.markdown(
     div[data-testid="stVerticalBlockBorderWrapper"]:has(.nav-marker) {
         height: calc(100vh - 0.95rem) !important;
         min-height: 670px !important;
-        max-height: 980px !important;
+        max-height: none !important;
         background:
             radial-gradient(circle at 50% 0%, rgba(46, 168, 255, 0.25), transparent 30%),
             linear-gradient(180deg, #071a37 0%, #030a17 100%) !important;
@@ -702,7 +702,7 @@ st.markdown(
 
     @media (max-width: 1450px) {
         div[data-testid="stVerticalBlockBorderWrapper"]:has(.nav-marker) {
-            min-height: 650px !important;
+            max-height: none !important;
         }
 
         div[data-testid="stVerticalBlockBorderWrapper"]:has(.nav-marker) > div {

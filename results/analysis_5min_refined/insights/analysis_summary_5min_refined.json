@@ -13,7 +13,7 @@
         "median_total_count": 158.0,
         "min_total_count": 76,
         "max_total_count": 323,
-        "std_total_count": 46.69706186316555,
+        "std_total_count": 46.697061863165466,
         "mean_abs_count_change": 7.638795986622074,
         "max_positive_count_change": 52.0,
         "max_negative_count_change": -48.0,
@@ -156,14 +156,9 @@
         "median_entropy": 1.5496380851308365,
         "min_entropy": 0.6817051216879215,
         "max_entropy": 1.9340276497911582,
-        "mean_normalized_entropy": 0.7265215207141972,
+        "mean_normalized_entropy": 0.7265215207141971,
         "median_normalized_entropy": 0.745218393530309,
         "min_normalized_entropy": 0.32783086613592394,
         "max_normalized_entropy": 0.9300706997652803
-    },
-    "outputs": {
-        "tables": "/kaggle/working/crowd_outputs/analysis_5min_refined/tables",
-        "figures": "/kaggle/working/crowd_outputs/analysis_5min_refined/figures",
-        "insights": "/kaggle/working/crowd_outputs/analysis_5min_refined/insights"
     }
 }
