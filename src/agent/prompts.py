@@ -8,7 +8,14 @@ Design:
   - Intent-specific guides injected when relevant
   - build_messages() / build_user_prompt() : called by agent.py
   - build_system_prompt_for_intent()       : returns augmented system prompt
+
+This version adds explicit support for:
+  - exact single-frame answers ("first frame", "last frame", "frame 1234")
+  - averaged time-window answers ("first minute", "last 30 seconds", "whole video")
+  - clearer separation between EXACT (single frame) vs AVERAGED (range) values
 """
+
+from typing import Dict, List, Optional
 
 
 # ============================================================
@@ -54,6 +61,29 @@ The pipeline:
    Never say: "evacuate", "guaranteed danger", "unsafe", "confirmed incident".
    Use: "prioritize monitoring", "review this zone", "indicates possible crowd build-up",
         "supports decision-making", "suggests higher attention", "warrants review".
+
+== EXACT FRAME vs AVERAGED WINDOW (VERY IMPORTANT) ==
+
+The tools can return two different kinds of time-based context. Read which one you were given
+and describe it correctly:
+
+- EXACT SINGLE FRAME — context key "exact_frame_state".
+  This happens for questions like "first frame", "last frame", "frame 1234".
+  Report these as the EXACT values for that one frame at that exact timestamp.
+  Say "at the first frame" / "at frame N" — do NOT call these averages.
+
+- AVERAGED TIME WINDOW — context key "time_range_average".
+  This happens for questions like "first minute", "last 30 seconds", "whole video",
+  or "between 1:00 and 2:00".
+  Report these as AVERAGES over the stated window. The per-zone risk shown is the
+  DOMINANT (most frequent) rule-based label across that window, and counts are averages.
+  Say "averaged over the first minute" — do NOT present these as a single instant.
+
+- SINGLE INSTANT — context keys "zone_status_at_time" / "all_zone_classifications_at_time".
+  This is the nearest frame to a requested timestamp (e.g. "at 1:00").
+  State the nearest matched timestamp clearly.
+
+If you are unsure which kind you have, look at the context keys before answering.
 
 == ANSWER STYLE ==
 
@@ -113,6 +143,8 @@ Factual context extracted from CSV outputs by Python tools:
 Instructions:
 - Answer using ONLY the factual context above.
 - Do not invent any numbers, zones, or timestamps not present in the context.
+- If the context contains "exact_frame_state", report EXACT single-frame values.
+- If the context contains "time_range_average", report AVERAGES over the stated window.
 - Follow the answer style in your system instructions.
 - If the context is insufficient, say what is missing rather than guessing.
 """
@@ -142,6 +174,34 @@ When explaining a zone:
 4. Classify: is it a persistent hotspot, a short-term peak zone, or a relatively calm area?
 5. If density is discussed: clarify it is pixel-based (density score = pixel_density × 10,000).
 6. If risk is discussed: clarify it is rule-based, not certified.
+"""
+
+TIME_QUERY_GUIDE = """
+== Time-Specific Query Instructions ==
+First decide which kind of time context you were given:
+
+A) EXACT SINGLE FRAME (context key "exact_frame_state"):
+   - Triggered by "first frame", "last frame", "frame 1234".
+   - Report the EXACT values for that single frame.
+   - State the frame descriptor and timestamp (e.g. "At the first frame (frame 0, 0:00)").
+   - List zone classifications: risk level, count, and density score.
+   - Do NOT call these averages.
+
+B) AVERAGED TIME WINDOW (context key "time_range_average"):
+   - Triggered by "first minute", "last 30 seconds", "whole video", or "between A and B".
+   - Report AVERAGES over the window: average total count, peak, minimum.
+   - Per zone: average count, max count, dominant (most frequent) rule-based risk, HIGH/CRITICAL%.
+   - Make clear these are averages over the window, not a single instant.
+
+C) SINGLE INSTANT (context key "zone_status_at_time" or "all_zone_classifications_at_time"):
+   - Triggered by "at 1:00", "at 90 seconds".
+   - State the nearest matched timestamp clearly (e.g. "At 1:00 (60.0s)").
+   - If user asked "each zone" / "all zones": list ALL zones, sorted by risk level.
+   - State total count at that time.
+
+In all cases:
+- State total count.
+- Caveat: density is pixel-based; risk is rule-based; values come from the nearest available frame(s).
 """
 
 TEMPORAL_EXPLANATION_GUIDE = """
@@ -199,19 +259,8 @@ Safe action language: prioritize monitoring, review video segments,
   increase sampling frequency, flag for operational review.
 Avoid: "evacuate", "unsafe", "guaranteed", "confirmed incident", "danger".
 
-If a timestamp is given, cite the zone states at that time in the evidence.
+If a timestamp, frame, or window is given, cite the zone states at that time in the evidence.
 Always end with: a reminder that risk labels are rule-based and density is pixel-based.
-"""
-
-TIME_QUERY_GUIDE = """
-== Time-Specific Query Instructions ==
-When the user asks about a specific time:
-1. State the nearest matched timestamp clearly (e.g. "At 1:00 (60.0s)").
-2. List the zone classifications at that time — risk level, count, and density score.
-3. If user asked "each zone" / "all zones": list ALL zones, sorted by risk level.
-4. If user asked about the selected zone only: focus on that zone but mention overall context.
-5. State total count at that time.
-6. Caveat: values are from the nearest frame, not the exact second requested.
 """
 
 COMPARISON_GUIDE = """
@@ -249,8 +298,9 @@ _CHART_MICRO_GUIDES: Dict[str, str] = {
     "rate_of_change": (
         "Explain the Rate of Change Proxy chart. "
         "Cover: what the 5-second rolling absolute change represents, "
-        "how to read peaks, what it tells operators about crowd flux, "
-        "and why it complements the raw count chart."
+        "how to read peaks, what it tells the monitoring team about crowd flux, "
+        "and why it complements the raw count chart. "
+        "Note it is a count-difference proxy, NOT optical flow."
     ),
     "zone_hotspot_ranking": (
         "Explain the Zone Hotspot Ranking chart. "
@@ -267,7 +317,7 @@ _CHART_MICRO_GUIDES: Dict[str, str] = {
     "refined_spike_events": (
         "Explain the Refined Spike Events chart. "
         "Cover: the spike detection rule, what each bar represents, "
-        "which zone had the most events, and what operators should do with this information."
+        "which zone had the most events, and what the monitoring team should do with this information."
     ),
     "risk_level_distribution": (
         "Explain the Risk Level Distribution chart. "
@@ -293,9 +343,6 @@ _CHART_MICRO_GUIDES: Dict[str, str] = {
 # ============================================================
 # INTENT → GUIDE MAPPING
 # ============================================================
-
-from typing import Dict, List, Optional
-
 
 _INTENT_GUIDES: Dict[str, str] = {
     "chart": CHART_EXPLANATION_GUIDE,
@@ -330,8 +377,7 @@ def build_system_prompt_for_intent(
     if chart_name and chart_name in _CHART_MICRO_GUIDES:
         base = base + "\n\n== Specific chart task ==\n" + _CHART_MICRO_GUIDES[chart_name]
 
-    # Recommendation guide is always appended when intent is recommendation
-    # (already included above) — but also add it if there's a mix
+    # Recommendation guide is also appended for broad/summary-style intents
     if intent != "recommendation" and any(
         kw in intent for kw in ["general", "global_summary", "thesis"]
     ):
@@ -364,6 +410,10 @@ def get_guide_for_question(question: str) -> str:
     q = question.lower()
     guides: List[str] = []
 
+    if any(k in q for k in ["first frame", "last frame", "frame ", "first minute",
+                            "last minute", "first 30", "last 30", "whole video",
+                            "at minute", "at 1:", "at 2:", "seconds"]):
+        guides.append(TIME_QUERY_GUIDE)
     if any(k in q for k in ["chart", "graph", "plot", "visual", "figure", "heatmap"]):
         guides.append(CHART_EXPLANATION_GUIDE)
     if any(k in q for k in ["zone", "sidewalk", "crosswalk"]):
@@ -432,7 +482,7 @@ INTENT_DESCRIPTIONS: Dict[str, str] = {
     "temporal": "Time trends, timeline, rate of change, build-up patterns.",
     "spatial": "Zone hotspot ranking, density comparison, where the crowd is.",
     "zone": "Explanation of a specific named zone.",
-    "time_specific": "Zone states or crowd levels at a specific timestamp.",
+    "time_specific": "Exact frame, averaged window, or single-instant zone states.",
     "risk": "Risk level questions — which zone is riskiest, what HIGH/CRITICAL means.",
     "peak": "Peak crowd moment — when, how many, which zones.",
     "anomaly": "Anomaly/spike detection — events, rules, affected zones.",

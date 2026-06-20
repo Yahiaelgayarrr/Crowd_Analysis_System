@@ -9,6 +9,15 @@ Pipeline:
   → build_context_for_question()  (call only the tools needed)
   → build_context_text_for_question()  (format as compact text)
   → LLM explains / rule-based fallback answers
+
+This version adds natural language understanding for:
+  - "first frame" / "last frame"      -> exact single frame lookup
+  - "frame 1234"                       -> exact single frame lookup
+  - "first minute" / "last minute"     -> averaged time-range lookup
+  - "first 30 seconds" / "last 10 sec" -> averaged time-range lookup
+  - "the beginning" / "the start"      -> exact first frame
+  - "the end"                          -> exact last frame
+  - "whole video" / "entire video"     -> full-duration range
 """
 
 from dataclasses import dataclass
@@ -150,24 +159,111 @@ def normalize_zone_name(text: str) -> str:
 
 
 # ============================================================
-# TIME PARSING
+# TIME / FRAME PARSING
 # ============================================================
 
 def _parse_time_token(token: str) -> Optional[float]:
     """
     Parse a single time token that may be:
       - "1:30" or "1;30"  → 90.0
-      - "90"              → 90.0 (seconds, only if ≤ duration, treated as seconds)
+      - "90"              → 90.0 (seconds)
     """
     token = token.strip()
-    # mm:ss or mm;ss
     m = re.match(r"^(\d{1,2})[;:](\d{2})$", token)
     if m:
         return float(int(m.group(1)) * 60 + int(m.group(2)))
-    # plain number
     m = re.match(r"^(\d+(?:\.\d+)?)$", token)
     if m:
         return float(m.group(1))
+    return None
+
+
+def parse_frame_reference(question: str) -> Optional[str]:
+    """
+    Detect requests for an EXACT single frame.
+
+    Returns one of:
+      "first"        -> first frame / beginning / start
+      "last"         -> last frame / end
+      "frame:<int>"  -> explicit numbered frame, e.g. "frame:1234"
+      None           -> no exact-frame request found
+    """
+    q = question.lower()
+
+    # explicit "frame 1234" / "frame #1234" / "frame number 1234"
+    m = re.search(r"\bframe\s*(?:number|no\.?|#)?\s*(\d+)\b", q)
+    if m:
+        return f"frame:{int(m.group(1))}"
+
+    # first frame / very first frame / opening frame / beginning / start
+    if re.search(r"\b(first|very first|opening|initial)\s+frame\b", q):
+        return "first"
+    if re.search(r"\b(the\s+)?(beginning|start)\b", q) and "frame" in q:
+        return "first"
+
+    # last frame / final frame / very last frame / end frame
+    if re.search(r"\b(last|very last|final|ending)\s+frame\b", q):
+        return "last"
+
+    return None
+
+
+def parse_relative_time_window(question: str) -> Optional[Tuple[float, float, str]]:
+    """
+    Detect relative-time RANGE requests that should be averaged.
+
+    Returns (start_sec, end_sec, label) or None.
+
+    Handles:
+      first minute / first min      -> (0, 60)
+      last minute / last min        -> (duration-60, duration)   [duration filled later]
+      first 30 seconds / first 30s  -> (0, 30)
+      last 10 seconds / last 10 sec -> (duration-10, duration)   [duration filled later]
+      first 2 minutes               -> (0, 120)
+      last 2 minutes                -> (duration-120, duration)  [duration filled later]
+      whole video / entire video    -> (0, duration)             [duration filled later]
+
+    The sentinel value -1.0 means "fill with video duration in build step".
+    """
+    q = question.lower()
+
+    # whole / entire / full video
+    if re.search(r"\b(whole|entire|full|complete)\s+(video|recording|clip|footage)\b", q) \
+       or re.search(r"\b(over|across|throughout)\s+the\s+(whole|entire|full)\b", q):
+        return (0.0, -1.0, "whole video")
+
+    # first N minutes
+    m = re.search(r"\bfirst\s+(\d+(?:\.\d+)?)\s*(?:min|mins|minute|minutes)\b", q)
+    if m:
+        secs = float(m.group(1)) * 60.0
+        return (0.0, secs, f"first {m.group(1)} minute(s)")
+
+    # last N minutes
+    m = re.search(r"\blast\s+(\d+(?:\.\d+)?)\s*(?:min|mins|minute|minutes)\b", q)
+    if m:
+        secs = float(m.group(1)) * 60.0
+        return (-secs, -1.0, f"last {m.group(1)} minute(s)")
+
+    # first N seconds
+    m = re.search(r"\bfirst\s+(\d+(?:\.\d+)?)\s*(?:sec|secs|second|seconds|s)\b", q)
+    if m:
+        secs = float(m.group(1))
+        return (0.0, secs, f"first {m.group(1)} second(s)")
+
+    # last N seconds
+    m = re.search(r"\blast\s+(\d+(?:\.\d+)?)\s*(?:sec|secs|second|seconds|s)\b", q)
+    if m:
+        secs = float(m.group(1))
+        return (-secs, -1.0, f"last {m.group(1)} second(s)")
+
+    # bare "first minute" / "first min"
+    if re.search(r"\bfirst\s+(?:min|minute)\b", q):
+        return (0.0, 60.0, "first minute")
+
+    # bare "last minute" / "last min"
+    if re.search(r"\blast\s+(?:min|minute)\b", q):
+        return (-60.0, -1.0, "last minute")
+
     return None
 
 
@@ -183,19 +279,16 @@ def parse_time_reference(question: str) -> Optional[float]:
     """
     q = question.lower()
 
-    # mm:ss or mm;ss  (with optional prefix word)
     m = re.search(
         r"\b(?:at|around|near|minute|min|time)?\s*(\d{1,2})\s*[;:]\s*(\d{2})\b", q
     )
     if m:
         return float(int(m.group(1)) * 60 + int(m.group(2)))
 
-    # "at minute 1" / "minute 2"
     m = re.search(r"\b(?:at|around|near)?\s*minute\s+(\d+(?:\.\d+)?)\b", q)
     if m:
         return float(m.group(1)) * 60.0
 
-    # "1 min 30 sec" / "2 minutes 15 seconds"
     m = re.search(
         r"\b(\d+(?:\.\d+)?)\s*(?:min|minute|minutes)\s+(\d+(?:\.\d+)?)\s*(?:sec|second|seconds)\b",
         q,
@@ -203,34 +296,36 @@ def parse_time_reference(question: str) -> Optional[float]:
     if m:
         return float(m.group(1)) * 60.0 + float(m.group(2))
 
-    # "2 minutes" alone
-    m = re.search(r"\b(\d+(?:\.\d+)?)\s*(?:min|minute|minutes)\b", q)
-    if m:
-        return float(m.group(1)) * 60.0
+    # "2 minutes" alone — but NOT "first/last N minutes" (handled by relative window)
+    if not re.search(r"\b(first|last)\b", q):
+        m = re.search(r"\b(\d+(?:\.\d+)?)\s*(?:min|minute|minutes)\b", q)
+        if m:
+            return float(m.group(1)) * 60.0
 
-    # "60 seconds" / "at 60 sec"
-    m = re.search(
-        r"\b(?:at|around|near)?\s*(\d+(?:\.\d+)?)\s*(?:sec|second|seconds)\b", q
-    )
-    if m:
-        return float(m.group(1))
+    # "60 seconds" / "at 60 sec" — but NOT "first/last N seconds"
+    if not re.search(r"\b(first|last)\b", q):
+        m = re.search(
+            r"\b(?:at|around|near)?\s*(\d+(?:\.\d+)?)\s*(?:sec|second|seconds)\b", q
+        )
+        if m:
+            return float(m.group(1))
 
     return None
 
 
 def parse_time_range(question: str) -> Optional[Tuple[float, float]]:
     """
-    Parse a time range from natural-language questions.
+    Parse an explicit time range from natural-language questions.
 
     Handles:
       between 1:00 and 2:00
       from 1:00 to 2:00
       between 60 seconds and 120 seconds
       from 60s to 120s
+      between 1 and 2 minutes
     """
     q = question.lower()
 
-    # "between X and Y" / "from X to Y" with mm:ss tokens
     patterns_mmss = [
         r"between\s+(\d{1,2}[;:]\d{2})\s+and\s+(\d{1,2}[;:]\d{2})",
         r"from\s+(\d{1,2}[;:]\d{2})\s+to\s+(\d{1,2}[;:]\d{2})",
@@ -243,7 +338,6 @@ def parse_time_range(question: str) -> Optional[Tuple[float, float]]:
             if t1 is not None and t2 is not None:
                 return (min(t1, t2), max(t1, t2))
 
-    # "between N sec and M sec"
     patterns_sec = [
         r"between\s+(\d+(?:\.\d+)?)\s*(?:sec|s|seconds?)\s+and\s+(\d+(?:\.\d+)?)\s*(?:sec|s|seconds?)",
         r"from\s+(\d+(?:\.\d+)?)\s*(?:sec|s|seconds?)\s+to\s+(\d+(?:\.\d+)?)\s*(?:sec|s|seconds?)",
@@ -255,7 +349,6 @@ def parse_time_range(question: str) -> Optional[Tuple[float, float]]:
             t2 = float(m.group(2))
             return (min(t1, t2), max(t1, t2))
 
-    # "between N and M minutes"
     m = re.search(
         r"between\s+(\d+(?:\.\d+)?)\s+and\s+(\d+(?:\.\d+)?)\s*(?:min|minute|minutes)",
         q,
@@ -280,7 +373,7 @@ def load_frame_csv(frame_csv: Path) -> pd.DataFrame:
     frame_time_col = find_col(df, ["timestamp_sec", "timestamp", "time_sec"], required=False)
     frame_id_col = find_col(df, ["frame_id", "frame", "frame_idx"], required=False)
     total_count_col = find_col(df, ["total_count", "count", "global_count"], label="total count column")
-    fps_col = find_col(df, ["fps", "inference_fps", "pipeline_fps"], required=False)
+    fps_col = find_col(df, ["inference_fps", "fps", "pipeline_fps"], required=False)
 
     if frame_time_col is None:
         df["timestamp_sec"] = np.arange(len(df)) / 30.0
@@ -290,7 +383,7 @@ def load_frame_csv(frame_csv: Path) -> pd.DataFrame:
     if frame_id_col is None:
         df["frame_id"] = np.arange(len(df))
     else:
-        df["frame_id"] = df[frame_id_col]
+        df["frame_id"] = pd.to_numeric(df[frame_id_col], errors="coerce").fillna(0).astype(int)
 
     df["total_count"] = pd.to_numeric(df[total_count_col], errors="coerce").fillna(0)
     df["fps"] = pd.to_numeric(df[fps_col], errors="coerce") if fps_col else np.nan
@@ -310,9 +403,11 @@ def load_zone_csv(zone_csv: Path) -> pd.DataFrame:
         ["zone_density_pixel", "density", "zone_density", "zone_density_pixel_cleaned", "density_pixel"],
         label="density column",
     )
-    risk_col = find_col(df, ["risk_level_text", "risk_level", "risk", "zone_risk"], label="risk column")
+    risk_col = find_col(df, ["risk_level", "risk_level_text", "risk", "zone_risk"], label="risk column")
     ts_col = find_col(df, ["timestamp_sec", "timestamp", "time_sec"], label="timestamp column")
     zid_col = find_col(df, ["zone_short_id", "zone_id", "zone_code", "zone_label"], required=False)
+    fid_col = find_col(df, ["frame_id", "frame", "frame_idx"], required=False)
+    area_col = find_col(df, ["zone_area_pixels", "zone_area", "area_pixels"], required=False)
 
     df["zone_name"] = df[zone_name_col].astype(str)
     df["zone_name_normalized"] = df["zone_name"].map(normalize_zone_name)
@@ -320,6 +415,16 @@ def load_zone_csv(zone_csv: Path) -> pd.DataFrame:
     df["density"] = pd.to_numeric(df[density_col], errors="coerce").fillna(0)
     df["risk_level"] = df[risk_col].map(normalize_risk)
     df["timestamp_sec"] = pd.to_numeric(df[ts_col], errors="coerce").fillna(0)
+
+    if fid_col is not None:
+        df["frame_id"] = pd.to_numeric(df[fid_col], errors="coerce").fillna(0).astype(int)
+    else:
+        df["frame_id"] = -1
+
+    if area_col is not None:
+        df["zone_area_pixels"] = pd.to_numeric(df[area_col], errors="coerce").fillna(0)
+    else:
+        df["zone_area_pixels"] = np.nan
 
     fallback_ids = {
         "crosswalk_main": "CW1", "crosswalk_left": "CW2",
@@ -525,7 +630,6 @@ def extract_all_zones_from_question(data: LoadedCrowdData, question: str) -> Lis
 # INTENT DETECTION
 # ============================================================
 
-# Chart keyword → canonical chart name
 _CHART_KEYWORDS: Dict[str, str] = {
     "global crowd timeline": "global_crowd_timeline",
     "global timeline": "global_crowd_timeline",
@@ -555,7 +659,6 @@ _CHART_KEYWORDS: Dict[str, str] = {
     "distribution entropy": "crowd_distribution_entropy",
 }
 
-# Keywords that signal the user wants ALL zones, not just the selected one
 _ALL_ZONES_KEYWORDS = [
     "each zone", "all zones", "every zone", "for all zones",
     "each of the zones", "list all", "zone by zone", "every area",
@@ -571,21 +674,12 @@ def detect_intent(
 ) -> Dict[str, Any]:
     """
     Classify the question into an intent and extract key routing parameters.
-
-    Returns a dict with:
-      intent          : str (see INTENT_* constants below)
-      time_ref        : Optional[float]  – single timestamp in seconds
-      time_range      : Optional[Tuple[float, float]]  – (start_sec, end_sec)
-      zone_from_question : Optional[str]  – zone explicitly named in question
-      zones_mentioned : List[str]  – all zones found in question
-      asks_all_zones  : bool  – True when user asks for all zones at once
-      zone_to_use     : Optional[str]  – None if asks_all_zones
-      chart_name      : Optional[str]  – canonical chart name if detected
-      selected_zone   : Optional[str]  – passed-in selected zone (may be None)
     """
     q = question.lower()
 
-    # ── Parse time ──────────────────────────────────────────
+    # ── Parse exact frame, relative window, single time, explicit range ──
+    frame_ref = parse_frame_reference(question)
+    relative_window = parse_relative_time_window(question)
     time_ref = parse_time_reference(question)
     time_range = parse_time_range(question)
 
@@ -622,22 +716,28 @@ def detect_intent(
         intent = "identity"
 
     elif any(k in q for k in [
-        "summary", "overview", "experiment", "important results",
-        "most important", "give me a summary", "overall results",
-        "tell me about", "what happened",
-    ]):
-        intent = "global_summary"
-
-    elif any(k in q for k in [
         "recommend", "recommendation", "what should", "operator",
-        "action", "decision", "what to do", "monitor", "prioritize",
+        "action", "decision", "what to do", "prioritize",
         "decision support", "advice", "suggest", "evidence-backed",
         "thesis-safe", "thesis recommendation",
     ]):
         intent = "recommendation"
 
-    elif time_ref is not None or time_range is not None:
+    # exact frame OR relative window OR single time OR explicit range
+    elif (
+        frame_ref is not None
+        or relative_window is not None
+        or time_ref is not None
+        or time_range is not None
+    ):
         intent = "time_specific"
+
+    elif any(k in q for k in [
+        "summary", "overview", "experiment", "important results",
+        "most important", "give me a summary", "overall results",
+        "tell me about", "what happened",
+    ]):
+        intent = "global_summary"
 
     elif len(zones_mentioned) >= 2 or "compare" in q or " vs " in q or "versus" in q:
         intent = "comparison"
@@ -658,7 +758,7 @@ def detect_intent(
     elif any(k in q for k in [
         "temporal", "timeline", "global crowd", "rate of change",
         "trend", "time trend", "over time", "build up", "increase",
-        "decrease", "temporal analysis", "global count",
+        "decrease", "temporal analysis",
     ]):
         intent = "temporal"
 
@@ -702,6 +802,8 @@ def detect_intent(
 
     return {
         "intent": intent,
+        "frame_ref": frame_ref,
+        "relative_window": relative_window,
         "time_ref": time_ref,
         "time_range": time_range,
         "zone_from_question": zone_from_question,
@@ -783,7 +885,6 @@ def get_zone_summary(data: LoadedCrowdData, zone_name: str) -> Dict[str, Any]:
 
 
 def get_all_zone_summaries(data: LoadedCrowdData) -> List[Dict[str, Any]]:
-    """Return a compact summary dict for every zone, sorted by high_critical_pct desc."""
     summaries = []
     for zone_name in available_zones(data):
         s = get_zone_summary(data, zone_name)
@@ -800,7 +901,6 @@ def get_all_zone_rankings(data: LoadedCrowdData) -> Dict[str, Any]:
     most_risky = summary.sort_values("high_critical_pct", ascending=False).iloc[0]
     most_spikes = summary.sort_values("spike_events", ascending=False).iloc[0]
 
-    # Full ranked list for LLM context
     ranked_by_avg = summary.sort_values("avg_count", ascending=False)[
         ["zone_name", "zone_id", "avg_count", "high_critical_pct", "spike_events", "dominant_risk"]
     ].to_dict(orient="records")
@@ -875,6 +975,83 @@ def get_peak_moment_context(data: LoadedCrowdData, window_sec: float = 5.0) -> D
     }
 
 
+def get_frame_exact(
+    data: LoadedCrowdData,
+    which: str,
+) -> Dict[str, Any]:
+    """
+    Return the EXACT zone-by-zone state for one specific frame.
+
+    `which` is one of:
+      "first"        -> the first frame in the video
+      "last"         -> the last frame in the video
+      "frame:<int>"  -> the frame whose frame_id == <int> (nearest if missing)
+    """
+    frame_df = data.frame_df
+    zone_df = data.zone_df
+
+    if which == "first":
+        frame_row = frame_df.iloc[0]
+        descriptor = "first frame"
+    elif which == "last":
+        frame_row = frame_df.iloc[-1]
+        descriptor = "last frame"
+    elif which.startswith("frame:"):
+        target_id = int(which.split(":", 1)[1])
+        if (frame_df["frame_id"] == target_id).any():
+            frame_row = frame_df[frame_df["frame_id"] == target_id].iloc[0]
+        else:
+            nearest_idx = (frame_df["frame_id"] - target_id).abs().idxmin()
+            frame_row = frame_df.loc[nearest_idx]
+        descriptor = f"frame {int(frame_row['frame_id'])}"
+    else:
+        frame_row = frame_df.iloc[0]
+        descriptor = "first frame"
+
+    frame_id = int(frame_row["frame_id"])
+    actual_time = float(frame_row["timestamp_sec"])
+
+    fzones = zone_df[zone_df["frame_id"] == frame_id]
+    if fzones.empty:
+        # fall back to nearest timestamp if frame_id is not aligned
+        rows = []
+        for zone_name, group in zone_df.groupby("zone_name"):
+            idx = (group["timestamp_sec"] - actual_time).abs().idxmin()
+            rows.append(group.loc[idx])
+        fzones = pd.DataFrame(rows)
+
+    zone_rows = []
+    for _, row in fzones.iterrows():
+        zone_rows.append({
+            "zone_name": str(row["zone_name"]),
+            "zone_id": str(row.get("zone_id", "")),
+            "count": int(row["zone_count"]),
+            "density_score_x10000": round(float(row["density"]) * 10000, 4),
+            "risk_level": str(row["risk_level"]),
+            "risk_score": risk_score(str(row["risk_level"])),
+        })
+
+    zone_rows_by_risk = sorted(
+        zone_rows, key=lambda x: (x["risk_score"], x["count"]), reverse=True
+    )
+
+    return {
+        "descriptor": descriptor,
+        "frame_id": frame_id,
+        "time_sec": actual_time,
+        "time_label": fmt_seconds(actual_time),
+        "total_count": int(frame_row["total_count"]),
+        "is_exact_frame": True,
+        "zones_ranked_by_risk": zone_rows_by_risk,
+        "zones_ranked_by_count": sorted(zone_rows, key=lambda x: x["count"], reverse=True),
+        "high_or_critical_zones": [r for r in zone_rows_by_risk if r["risk_level"] in {"HIGH", "CRITICAL"}],
+        "note": (
+            "These are exact values for a single frame. "
+            "Risk is rule-based. Density is pixel-based relative to polygon area."
+        ),
+    }
+
+
 def get_zone_status_at_time(data: LoadedCrowdData, timestamp_sec: float) -> Dict[str, Any]:
     frame_df = data.frame_df
     zone_df = data.zone_df
@@ -918,10 +1095,6 @@ def get_zone_status_at_time(data: LoadedCrowdData, timestamp_sec: float) -> Dict
 def get_all_zone_classifications_at_time(
     data: LoadedCrowdData, timestamp_sec: float
 ) -> Dict[str, Any]:
-    """
-    Explicit function: return risk/count/density for EVERY zone at a timestamp.
-    Used when the user asks 'at 1:00 list all zones', 'each zone at 60s', etc.
-    """
     status = get_zone_status_at_time(data, timestamp_sec)
     return {
         "requested_time_sec": status["requested_time_sec"],
@@ -947,7 +1120,6 @@ def get_all_zone_classifications_at_time(
 def get_top_risky_zones_at_time(
     data: LoadedCrowdData, timestamp_sec: float, n: int = 3
 ) -> Dict[str, Any]:
-    """Return the top N riskiest zones at a given timestamp."""
     status = get_zone_status_at_time(data, timestamp_sec)
     top = status["zones_ranked_by_risk_at_time"][:n]
     return {
@@ -980,9 +1152,9 @@ def get_context_around_time(
 
 
 def get_time_range_summary(
-    data: LoadedCrowdData, start_sec: float, end_sec: float
+    data: LoadedCrowdData, start_sec: float, end_sec: float, label: Optional[str] = None
 ) -> Dict[str, Any]:
-    """Summarise crowd activity within a time range."""
+    """Summarise (average) crowd activity within a time range."""
     frame_df = data.frame_df
     zone_df = data.zone_df
 
@@ -1001,7 +1173,11 @@ def get_time_range_summary(
 
     zone_stats = (
         zw.groupby("zone_name")
-        .agg(avg_count=("zone_count", "mean"), max_count=("zone_count", "max"))
+        .agg(
+            avg_count=("zone_count", "mean"),
+            max_count=("zone_count", "max"),
+            mean_density=("density", "mean"),
+        )
         .reset_index()
     )
     risk_modes = (
@@ -1009,19 +1185,41 @@ def get_time_range_summary(
         .agg(lambda s: s.mode().iloc[0] if not s.mode().empty else "UNKNOWN")
         .reset_index(name="dominant_risk_in_range")
     )
+    hc_pct = (
+        zw.assign(is_hc=zw["risk_level"].isin(["HIGH", "CRITICAL"]).astype(int))
+        .groupby("zone_name")["is_hc"]
+        .mean()
+        .mul(100)
+        .reset_index(name="high_critical_pct_in_range")
+    )
     zone_stats = zone_stats.merge(risk_modes, on="zone_name", how="left")
+    zone_stats = zone_stats.merge(hc_pct, on="zone_name", how="left")
     zone_stats["avg_count"] = zone_stats["avg_count"].round(2)
     zone_stats["max_count"] = zone_stats["max_count"].astype(int)
+    zone_stats["mean_density_score_x10000"] = (zone_stats["mean_density"] * 10000).round(4)
+    zone_stats["high_critical_pct_in_range"] = zone_stats["high_critical_pct_in_range"].round(2)
+    zone_stats = zone_stats.drop(columns=["mean_density"])
+    zone_stats = zone_stats.sort_values("avg_count", ascending=False)
 
     return {
+        "range_label": label or f"{fmt_seconds(start_sec)}–{fmt_seconds(end_sec)}",
         "start_label": fmt_seconds(start_sec),
         "end_label": fmt_seconds(end_sec),
+        "start_sec": round(float(start_sec), 2),
+        "end_sec": round(float(end_sec), 2),
+        "is_average_over_range": True,
+        "frames_in_range": int(len(fw)),
         "avg_total_count": round(float(fw["total_count"].mean()), 2),
         "max_total_count": int(fw["total_count"].max()),
         "min_total_count": int(fw["total_count"].min()),
         "peak_time_label": fmt_seconds(float(peak_row["timestamp_sec"])),
         "peak_count": int(peak_row["total_count"]),
         "zone_summaries_in_range": zone_stats.to_dict(orient="records"),
+        "note": (
+            "Values are AVERAGED over the time range. "
+            "Risk shown per zone is the dominant (most frequent) rule-based label in that range. "
+            "Density is pixel-based."
+        ),
     }
 
 
@@ -1106,7 +1304,6 @@ def get_temporal_summary(data: LoadedCrowdData) -> Dict[str, Any]:
     idx_max_change = frame_df["rolling_abs_change_5s"].idxmax()
     row_max_change = frame_df.loc[idx_max_change]
 
-    # Simple trend: compare first 25% vs last 25%
     n = len(frame_df)
     first_quarter = frame_df.iloc[: n // 4]["total_count"].mean()
     last_quarter = frame_df.iloc[-n // 4 :]["total_count"].mean()
@@ -1207,11 +1404,6 @@ def compare_zones(data: LoadedCrowdData, zone_a: str, zone_b: str) -> Dict[str, 
 # ============================================================
 
 def get_chart_context(data: LoadedCrowdData, chart_name: str) -> Dict[str, Any]:
-    """
-    Return compact factual context to explain a specific dashboard chart.
-
-    chart_name is one of the canonical names from _CHART_KEYWORDS.
-    """
     cn = chart_name.lower().replace(" ", "_")
 
     if cn == "global_crowd_timeline":
@@ -1306,7 +1498,7 @@ def get_chart_context(data: LoadedCrowdData, chart_name: str) -> Dict[str, Any]:
                 "Horizontal bar chart of mean pixel density score per zone, "
                 "displayed as pixel density × 10,000 for readability."
             ),
-            "axes": {"x": "Density score (pixel density × 10⁴)", "y": "Zone name"},
+            "axes": {"x": "Density score (pixel density × 10^4)", "y": "Zone name"},
             "key_numbers": {
                 "highest_density_zone": rankings["highest_mean_density_zone"],
                 "zones_by_density": [
@@ -1359,7 +1551,7 @@ def get_chart_context(data: LoadedCrowdData, chart_name: str) -> Dict[str, Any]:
                 "Stacked bar chart showing the proportion of LOW/MEDIUM/HIGH/CRITICAL "
                 "frames for each zone across the full recording."
             ),
-            "axes": {"x": "Zone name", "y": "Percentage of frames (0–100%)"},
+            "axes": {"x": "Zone name", "y": "Percentage of frames (0-100%)"},
             "risk_label_definitions": {
                 "LOW": "Low estimated count relative to zone capacity",
                 "MEDIUM": "Moderate estimated count",
@@ -1447,9 +1639,6 @@ def get_recommendation_context(
     question: Optional[str] = None,
     selected_zone: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """
-    Gather all evidence needed to produce data-backed recommendations.
-    """
     rankings = get_all_zone_rankings(data)
     risk_summary = get_risk_summary(data)
     anomaly_summary = get_anomaly_summary(data)
@@ -1474,8 +1663,20 @@ def get_recommendation_context(
 
     time_context = None
     if question:
+        fr = parse_frame_reference(question)
+        rel = parse_relative_time_window(question)
         t = parse_time_reference(question)
-        if t is not None:
+        if fr is not None:
+            time_context = get_frame_exact(data, fr)
+        elif rel is not None:
+            s, e, lbl = rel
+            duration = float(data.frame_df["timestamp_sec"].max())
+            if e < 0:
+                e = duration
+            if s < 0:
+                s = max(0.0, duration + s)
+            time_context = get_time_range_summary(data, s, e, label=lbl)
+        elif t is not None:
             time_context = get_all_zone_classifications_at_time(data, t)
 
     selected_zone_data = None
@@ -1496,7 +1697,7 @@ def get_recommendation_context(
         "selected_zone_summary": selected_zone_data,
         "thesis_safe_guidance": (
             "Risk labels are rule-based prototype labels, not certified safety thresholds. "
-            "Density is pixel-based, not real-world persons/m². "
+            "Density is pixel-based, not real-world persons/m^2. "
             "Recommendations should be framed as monitoring priorities, not safety directives."
         ),
     }
@@ -1545,12 +1746,16 @@ def build_context_for_question(
     """
     intent_info = detect_intent(data, question, selected_zone)
     intent = intent_info["intent"]
+    frame_ref = intent_info["frame_ref"]
+    relative_window = intent_info["relative_window"]
     time_ref = intent_info["time_ref"]
     time_range = intent_info["time_range"]
     zone_to_use = intent_info["zone_to_use"]
     zones_mentioned = intent_info["zones_mentioned"]
     asks_all_zones = intent_info["asks_all_zones"]
     chart_name = intent_info["chart_name"]
+
+    duration = float(data.frame_df["timestamp_sec"].max())
 
     context: Dict[str, Any] = {}
     context["global_summary"] = get_global_summary(data)
@@ -1565,6 +1770,8 @@ def build_context_for_question(
                 "computed zone summaries: averages, peaks, spike events, density trends",
             ],
             "can_answer": [
+                "Exact single-frame states: 'first frame', 'last frame', 'frame 1234'",
+                "Averaged time windows: 'first minute', 'last 30 seconds', 'whole video'",
                 "Temporal analysis: peak moments, count trends, rate of change",
                 "Spatial analysis: zone hotspot ranking, density comparison",
                 "Anomaly detection: spike events, sudden changes",
@@ -1581,7 +1788,7 @@ def build_context_for_question(
             ),
             "limitations": [
                 "Does not directly watch the video",
-                "Density is pixel-based, not real-world persons/m²",
+                "Density is pixel-based, not real-world persons/m^2",
                 "Risk labels are rule-based prototypes, not certified thresholds",
                 "Motion/stagnation requires optical flow (not yet implemented)",
                 "Uses saved offline outputs, not live CCTV unless pipeline is updated",
@@ -1589,20 +1796,43 @@ def build_context_for_question(
         }
         return context
 
-    # ── Time-specific ──────────────────────────────────────
+    # ── Time-specific (exact frame / relative window / single time / range) ──
     if intent == "time_specific":
-        if asks_all_zones and time_ref is not None:
-            context["all_zone_classifications_at_time"] = get_all_zone_classifications_at_time(
-                data, time_ref
-            )
-        elif time_ref is not None:
-            context["zone_status_at_time"] = get_zone_status_at_time(data, time_ref)
-            context["context_around_time"] = get_context_around_time(data, time_ref, window_sec=5.0)
+        # 1) exact single frame request wins first
+        if frame_ref is not None:
+            context["exact_frame_state"] = get_frame_exact(data, frame_ref)
             if zone_to_use:
                 context["selected_zone_summary"] = get_zone_summary(data, zone_to_use)
+            return context
 
+        # 2) relative window -> averaged range
+        if relative_window is not None:
+            s, e, lbl = relative_window
+            if e < 0:
+                e = duration
+            if s < 0:
+                s = max(0.0, duration + s)
+            context["time_range_average"] = get_time_range_summary(data, s, e, label=lbl)
+            return context
+
+        # 3) explicit "between A and B" range
         if time_range is not None:
-            context["time_range_summary"] = get_time_range_summary(data, *time_range)
+            context["time_range_average"] = get_time_range_summary(
+                data, time_range[0], time_range[1]
+            )
+            return context
+
+        # 4) single instant
+        if time_ref is not None:
+            if asks_all_zones:
+                context["all_zone_classifications_at_time"] = get_all_zone_classifications_at_time(
+                    data, time_ref
+                )
+            else:
+                context["zone_status_at_time"] = get_zone_status_at_time(data, time_ref)
+                context["context_around_time"] = get_context_around_time(data, time_ref, window_sec=5.0)
+                if zone_to_use:
+                    context["selected_zone_summary"] = get_zone_summary(data, zone_to_use)
         return context
 
     # ── Recommendation ─────────────────────────────────────
@@ -1610,10 +1840,6 @@ def build_context_for_question(
         context["recommendation_context"] = get_recommendation_context(
             data, question=question, selected_zone=zone_to_use
         )
-        if time_ref is not None:
-            context["time_specific_context"] = get_all_zone_classifications_at_time(
-                data, time_ref
-            )
         return context
 
     # ── Chart explanation ──────────────────────────────────
@@ -1621,7 +1847,6 @@ def build_context_for_question(
         if chart_name:
             context["chart_context"] = get_chart_context(data, chart_name)
         else:
-            # No specific chart identified — provide all analytics context
             context["temporal_summary"] = get_temporal_summary(data)
             context["zone_rankings"] = get_all_zone_rankings(data)
             context["risk_summary"] = get_risk_summary(data)
@@ -1743,6 +1968,10 @@ def build_context_text_for_question(
         "it does NOT directly watch the video.\n"
         "- Motion/stagnation requires optical flow or tracking — "
         "do not claim stagnation detection is implemented.\n"
+        "- If the context contains 'exact_frame_state', report those values as the EXACT "
+        "values for that single frame.\n"
+        "- If the context contains 'time_range_average', report those values as AVERAGES "
+        "over the stated window, not single-frame values.\n"
         "- Use ONLY facts from this context. Do NOT invent any numbers."
     )
 
@@ -1764,17 +1993,23 @@ def answer_rule_based(
     """
     intent_info = detect_intent(data, question, selected_zone)
     intent = intent_info["intent"]
+    frame_ref = intent_info["frame_ref"]
+    relative_window = intent_info["relative_window"]
     time_ref = intent_info["time_ref"]
     time_range = intent_info["time_range"]
     asks_all_zones = intent_info["asks_all_zones"]
     zone_to_use = intent_info["zone_to_use"]
     chart_name = intent_info["chart_name"]
 
+    duration = float(data.frame_df["timestamp_sec"].max())
+
     # ── Identity ───────────────────────────────────────────
     if intent == "identity":
         return (
             "I am the **AI Insights Assistant** for this crowd monitoring dashboard.\n\n"
             "I can answer questions about:\n"
+            "- **Exact frames** — 'first frame', 'last frame', 'frame 1234'\n"
+            "- **Time windows** — 'first minute', 'last 30 seconds', 'whole video' (averaged)\n"
             "- **Temporal analysis** — peak moments, count trends, rate of change\n"
             "- **Spatial analysis** — zone hotspots, density rankings\n"
             "- **Anomaly detection** — spike events and sudden changes\n"
@@ -1786,7 +2021,59 @@ def answer_rule_based(
             "not directly from the video."
         )
 
-    # ── Time-specific: all zones ───────────────────────────
+    # ── Exact single frame (first / last / frame N) ────────
+    if frame_ref is not None:
+        fx = get_frame_exact(data, frame_ref)
+        lines = [
+            f"At the **{fx['descriptor']}** (frame {fx['frame_id']}, {fx['time_label']}), "
+            f"total count was **{fmt_int(fx['total_count'])}**.\n",
+            "Exact zone-by-zone classification (sorted by risk level):\n",
+        ]
+        for z in fx["zones_ranked_by_risk"]:
+            lines.append(
+                f"- **{z['zone_name']} ({z['zone_id']})**: "
+                f"Risk **{z['risk_level']}**, "
+                f"Count **{fmt_int(z['count'])}**, "
+                f"Density score **{fmt_float(z['density_score_x10000'], 2)}**"
+            )
+        lines.append(
+            "\n*These are exact single-frame values. "
+            "Risk is rule-based. Density is pixel-based, not real-world persons/m².*"
+        )
+        return "\n".join(lines)
+
+    # ── Relative time window (first/last minute, etc.) ─────
+    if relative_window is not None:
+        s, e, lbl = relative_window
+        if e < 0:
+            e = duration
+        if s < 0:
+            s = max(0.0, duration + s)
+        tr = get_time_range_summary(data, s, e, label=lbl)
+        if "error" in tr:
+            return f"No data found for {lbl}."
+        lines = [
+            f"Averaged over the **{tr['range_label']}** "
+            f"({tr['start_label']}–{tr['end_label']}, {tr['frames_in_range']} frames):\n",
+            f"- Average total count: **{fmt_count(tr['avg_total_count'])}**",
+            f"- Peak total count: **{fmt_int(tr['max_total_count'])}** at **{tr['peak_time_label']}**",
+            f"- Minimum total count: **{fmt_int(tr['min_total_count'])}**\n",
+            "Per-zone averages in this window (sorted by avg count):\n",
+        ]
+        for z in tr["zone_summaries_in_range"]:
+            lines.append(
+                f"- **{z['zone_name']}**: avg count **{fmt_count(z['avg_count'])}**, "
+                f"max **{fmt_int(z['max_count'])}**, "
+                f"dominant risk **{z['dominant_risk_in_range']}**, "
+                f"{fmt_pct(z['high_critical_pct_in_range'])} HIGH/CRITICAL"
+            )
+        lines.append(
+            "\n*Values are averaged over the window. "
+            "Risk is rule-based. Density is pixel-based.*"
+        )
+        return "\n".join(lines)
+
+    # ── Time-specific: all zones at one instant ────────────
     if time_ref is not None and asks_all_zones:
         allz = get_all_zone_classifications_at_time(data, time_ref)
         lines = [
@@ -1806,7 +2093,7 @@ def answer_rule_based(
         )
         return "\n".join(lines)
 
-    # ── Time-specific: top zones ───────────────────────────
+    # ── Time-specific: top zones at one instant ────────────
     if time_ref is not None:
         status = get_zone_status_at_time(data, time_ref)
         top3 = status["zones_ranked_by_risk_at_time"][:3]
@@ -1835,7 +2122,7 @@ def answer_rule_based(
         lines.append("\n*Risk is rule-based. Density is pixel-based.*")
         return "\n".join(lines)
 
-    # ── Time range ─────────────────────────────────────────
+    # ── Explicit time range ────────────────────────────────
     if time_range is not None:
         tr = get_time_range_summary(data, time_range[0], time_range[1])
         return (
@@ -2061,6 +2348,8 @@ __all__ = [
     "resolve_zone_name",
     "extract_zone_from_question",
     "extract_all_zones_from_question",
+    "parse_frame_reference",
+    "parse_relative_time_window",
     "parse_time_reference",
     "parse_time_range",
     "detect_intent",
@@ -2069,6 +2358,7 @@ __all__ = [
     "get_all_zone_summaries",
     "get_all_zone_rankings",
     "get_peak_moment_context",
+    "get_frame_exact",
     "get_zone_status_at_time",
     "get_all_zone_classifications_at_time",
     "get_top_risky_zones_at_time",
