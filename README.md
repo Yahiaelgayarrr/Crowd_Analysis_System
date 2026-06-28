@@ -6,6 +6,7 @@
 ![Streamlit](https://img.shields.io/badge/Streamlit-Dashboard-FF4B4B?logo=streamlit&logoColor=white)
 ![Status](https://img.shields.io/badge/status-research%20prototype-blue)
 ![Thesis](https://img.shields.io/badge/Bachelor%20Thesis-GUC%202026-success)
+![License](https://img.shields.io/badge/License-MIT-yellow)
 
 An intelligent crowd monitoring and behavioral analysis system that turns CCTV-style
 video into structured, visual, and explainable crowd intelligence — moving beyond a
@@ -109,19 +110,22 @@ The system is demonstrated on a 5-minute Shinjuku crossing video:
 
 ## How It Works
 
-The pipeline runs in three stages:
+The pipeline runs in three stages.
 
-**A. Capture & Setup (once, offline)**
+**A. Capture & Setup** (once, offline)
+
 1. Record a CCTV-style video clip.
 2. Extract the first frame and draw meaningful zones by hand in LabelMe (saved as JSON polygons).
 
-**B. Process (Kaggle GPU)**
-3. FIDTM runs frame-by-frame across the whole recording.
-4. It emits 4 annotated videos + 2 CSV data files.
+**B. Process** (Kaggle GPU)
 
-**C. Analyze & Present (local — VSCode + Streamlit)**
-5. Four analytics layers are computed from the CSVs.
-6. A Streamlit dashboard and AI assistant present and explain the results.
+1. FIDTM runs frame-by-frame across the whole recording.
+2. It emits 4 annotated videos + 2 CSV data files.
+
+**C. Analyze & Present** (local — VSCode + Streamlit)
+
+1. Four analytics layers are computed from the CSVs.
+2. A Streamlit dashboard and AI assistant present and explain the results.
 
 ```
 Video frame
@@ -399,8 +403,5 @@ datasets; full references are provided in the thesis document.
 
 ## License
 
-This project was developed for academic purposes as part of a Bachelor thesis at the
-German University in Cairo (2026). You are welcome to read, reference, and build on the
-work with appropriate credit. If you want to allow reuse explicitly, add a standard
-open-source license (for example, [MIT](https://choosealicense.com/licenses/mit/)) as a
-`LICENSE` file in the project root.
+Released under the [MIT License](LICENSE). Developed as a Bachelor thesis at the German
+University in Cairo (2026) — you are welcome to use, modify, and build on it with attribution.
