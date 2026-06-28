@@ -87,8 +87,9 @@ results/videos/*.mp4
 results/videos/*.avi
 results/videos/*.mov
 results/videos/*.mkv
+results/videos_dashboard/
 
-# Keep important CSV/XLSX/JPG outputs
+# Keep important CSV/XLSX/image outputs
 !results/benchmark/*.csv
 !results/benchmark/*.xlsx
 !results/visualizations/*.jpg
@@ -99,8 +100,3 @@ results/videos/*.mkv
 # =========================
 *.log
 logs/
-data/raw/*
-!data/raw/.gitkeep
-# Dashboard converted videos
-results/videos_dashboard/
-results/videos_dashboard/*.mp4.env

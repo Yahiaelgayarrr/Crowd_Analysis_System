@@ -1,11 +1,47 @@
 # Crowd Analysis System
 
+![Python](https://img.shields.io/badge/Python-3.10+-3776AB?logo=python&logoColor=white)
+![PyTorch](https://img.shields.io/badge/PyTorch-FIDTM-EE4C2C?logo=pytorch&logoColor=white)
+![OpenCV](https://img.shields.io/badge/OpenCV-Vision-5C3EE8?logo=opencv&logoColor=white)
+![Streamlit](https://img.shields.io/badge/Streamlit-Dashboard-FF4B4B?logo=streamlit&logoColor=white)
+![Status](https://img.shields.io/badge/status-research%20prototype-blue)
+![Thesis](https://img.shields.io/badge/Bachelor%20Thesis-GUC%202026-success)
+
 An intelligent crowd monitoring and behavioral analysis system that turns CCTV-style
 video into structured, visual, and explainable crowd intelligence — moving beyond a
 simple global head count toward **zone-level monitoring and decision support**.
 
 Bachelor Thesis · German University in Cairo (GUC) · 2026
 Author: **Yahia El Gayar** · Supervisor: **Dr. Rimon Elias**
+
+<!-- Hero: full pipeline output (localization, heatmap, heatmap-only, zone risk) -->
+![Crowd Analysis System — pipeline outputs](results/visualizations/pipeline_4panel.jpg)
+
+> One frame, four views: FIDTM localization, heatmap overlay, heatmap-only, and zone density + risk.
+
+---
+
+## Table of Contents
+
+- [Overview](#overview)
+- [Key Features](#key-features)
+- [Screenshots](#screenshots)
+- [Reference Run](#reference-run)
+- [How It Works](#how-it-works)
+- [Model Selection](#model-selection-summary)
+- [Risk Thresholds](#risk-thresholds)
+- [Project Structure](#project-structure)
+- [Installation](#installation)
+- [Configuration](#configuration)
+- [Usage](#usage)
+- [The Dashboard](#the-dashboard)
+- [AI Assistant](#ai-assistant)
+- [Generated Outputs](#generated-outputs)
+- [Limitations](#limitations)
+- [Future Work](#future-work)
+- [Tech Stack](#tech-stack)
+- [Acknowledgments](#acknowledgments)
+- [License](#license)
 
 ---
 
@@ -40,6 +76,20 @@ from the exported results.
 - **Streamlit dashboard** — KPI cards, output videos, zone analysis, and analytics charts.
 - **AI assistant** — a data-grounded agent that answers questions from the exported CSVs,
   with a deterministic rule-based fallback when no AI model is available.
+
+---
+
+## Screenshots
+
+**Crowd localization** — FIDTM marks an exact head point for every person, frame by frame,
+holding up even in dense crowds:
+
+![FIDTM localization on a Shinjuku crossing](results/visualizations/localization.jpg)
+
+**Zone density & risk** — each detected head is assigned to a polygon zone, and every zone
+gets a count, a relative density, and a four-level risk label:
+
+![Zone density and risk](results/visualizations/zone_risk_mall.jpg)
 
 ---
 
@@ -122,7 +172,7 @@ Per-zone risk is assigned from the zone count using configurable thresholds:
 ## Project Structure
 
 ```
-crowd-analysis-system/
+Crowd_Analysis_System/
 ├── config/                 # Pipeline config, risk thresholds, zone polygon JSON
 ├── data/
 │   ├── raw/                # Input videos and annotation frames
@@ -156,8 +206,8 @@ and analytics run on CPU.
 
 ```bash
 # 1. Clone the repository
-git clone https://github.com/<your-username>/crowd-analysis-system.git
-cd crowd-analysis-system
+git clone https://github.com/Yahiaelgayarrr/Crowd_Analysis_System.git
+cd Crowd_Analysis_System
 
 # 2. (Recommended) create a virtual environment
 python -m venv venv
@@ -226,6 +276,8 @@ python -m src.pipeline.run_analysis_5min
 
 ```bash
 streamlit run src/dashboard/app.py
+# or, if the streamlit command is not on your PATH:
+python -m streamlit run src/dashboard/app.py
 ```
 
 Then open the local URL shown in the terminal (typically `http://localhost:8501`).
@@ -238,6 +290,8 @@ Then open the local URL shown in the terminal (typically `http://localhost:8501`
 a switchable video player (localization, heatmap overlay, heatmap only, zone density + risk),
 a per-zone analysis panel, and the AI assistant.
 
+![Dashboard overview page](results/visualizations/dashboard_overview.png)
+
 **Analytics page** — four tabs:
 
 | Layer | Shows | Why it matters |
@@ -246,6 +300,22 @@ a per-zone analysis panel, and the AI assistant.
 | Spatial | Zone hotspot ranking + density by zone | **Where** the crowd concentrates |
 | Anomaly | Spike events + risk distribution | Sudden build-ups and chronically busy zones |
 | Statistical | Zone correlation + crowd entropy | How zones relate and when the crowd concentrates |
+
+*Temporal — global crowd timeline and rate of change:*
+
+![Temporal analytics](results/visualizations/analytics_temporal.png)
+
+*Spatial — zone hotspot ranking and mean pixel density per zone:*
+
+![Spatial analytics](results/visualizations/analytics_spatial.png)
+
+*Anomaly — refined spike events and per-zone risk distribution:*
+
+![Anomaly analytics](results/visualizations/analytics_anomaly.png)
+
+*Statistical — zone correlation matrix and crowd-distribution entropy:*
+
+![Statistical analytics](results/visualizations/analytics_statistical.png)
 
 ---
 
@@ -267,6 +337,8 @@ It can answer:
 
 If the LLM is unavailable, a **rule-based fallback** answers the most important factual
 questions deterministically from the CSVs.
+
+![AI Insights Assistant in the dashboard](results/visualizations/dashboard_assistant.png)
 
 ---
 
@@ -328,4 +400,7 @@ datasets; full references are provided in the thesis document.
 ## License
 
 This project was developed for academic purposes as part of a Bachelor thesis at the
-German University in Cairo (2026).
+German University in Cairo (2026). You are welcome to read, reference, and build on the
+work with appropriate credit. If you want to allow reuse explicitly, add a standard
+open-source license (for example, [MIT](https://choosealicense.com/licenses/mit/)) as a
+`LICENSE` file in the project root.
